@@ -172,4 +172,13 @@ ln -s /opt/cprocsp/bin/amd64/inittst
 ln -s /opt/cprocsp/bin/amd64/wipefile
 ln -s /opt/cprocsp/sbin/amd64/cpconfig
 ```
-3. Необходимо установить тестовые сертификаты. Их должен получить заказчик при регистрации приложения на госуслугах.
+3. Необходимо установить тестовые сертификаты. Их должен получить заказчик при регистрации приложения на госуслугах (скачать сертификат на сервер)
+4. Выполняем:
+```
+cp -R 93e4b302.000 /var/opt/cprocsp/keys/a1
+chmod 600 /var/opt/cprocsp/keys/a1/93e4b302.000
+/opt/cprocsp/bin/amd64/csptest -keyset -enum_cont -verifycontext -fqcn 
+
+
+
+```
