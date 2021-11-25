@@ -149,7 +149,10 @@ def esia_callback(request):
 ```
 
 
-### Additional settings
+### Порядок установки
+
+1. Устанавливаем cryptopr csp через центр загрузок https://www.cryptopro.ru/products/csp/downloads
+2. Распаковываем. Далее:
 http://pushorigin.ru/cryptopro/cryptcp
 
 Cryptopro server:\n
@@ -168,5 +171,5 @@ ln -s /opt/cprocsp/bin/amd64/der2xer
 ln -s /opt/cprocsp/bin/amd64/inittst
 ln -s /opt/cprocsp/bin/amd64/wipefile
 ln -s /opt/cprocsp/sbin/amd64/cpconfig
-
 ```
+3. Необходимо установить тестовые сертификаты. Их должен получить заказчик при регистрации приложения на госуслугах.
