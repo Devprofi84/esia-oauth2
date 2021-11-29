@@ -22,26 +22,6 @@ pip install --upgrade git+https://github.com/sokolovs/esia-oauth2.git
 pip install -r https://raw.githubusercontent.com/sokolovs/esia-oauth2/master/requirements.txt
 ```
 
-### Предварительные условия
-
-Для работы требуется наличие публичного и приватного ключа в соответствии с методическими рекомендациями
-по работе с ЕСИА. Допускается использование самоподписного сертифката, который можно сгенерировать
-следующей командой:
-```
-openssl req -x509 -nodes -days 3650 -newkey rsa:2048 -sha1 -keyout my_private.key -out my_public_cert.crt
-```
-
-Полученный в результате файл my_public_cert.crt должен быть привязан к информационной системе вашей организации
-на сайте Госуслуг, а также направлен вместе с заявкой на доступ к ЕСИА
-(подробнее см. документы http://minsvyaz.ru/ru/documents/?words=ЕСИА).
-
-**Внимание!** С 01 апреля 2020 прекращается поддержка использования самоподписных сертификатов. Необходимо
-получить ключ ГОСТ 2012 в одном из сертификационных центров и использовать алгоритм подписи ГОСТ Р 34.10-2012.
-Для этого необходимо установить на сервере КриптоПРО CSP, установить контейнер с закрытым ключем, а так же
-привязать сертификат связанный с закрытым ключем к своей информационной системе.
-
-Для валидации ответов от ЕСИА потребуется публичный ключ, который можно запросить в технической поддержке ЕСИА,
-уже после регистрации информационной системы и получения доступа к тестовой среде ЕСИА. Валидация опциональна.
 
 ### Пример использования в Django
 
@@ -54,15 +34,6 @@ SERVICE_URL: https://esia-portal1.test.gosuslugi.ru
 
 # Идентификатор информационной системы, указывается в заявке на подключение
 CLIENT_ID: MYIS01
-
-# Публичный ключ/сертфикат (необязателен, используется только для m2crypto или openssl)
-CERT_FILE: keys/my_public_cert.crt
-
-# Приватный ключ (необязателен, используется только для m2crypto или openssl)
-PRIV_KEY_FILE: keys/my_private.key
-
-# Публичный ключ сервиса ЕСИА, для валидации ответов (необязателен)
-JWT_CHECK_KEY: keys/esia_test_pub.key
 
 # Адрес страницы, на которую будет перенаправлен браузер после авторизации в ЕСИА
 REDIRECT_URI: http://127.0.0.1:8000/esia/callback/
@@ -151,34 +122,75 @@ def esia_callback(request):
 
 ### Порядок установки
 
-1. Устанавливаем cryptopr csp через центр загрузок https://www.cryptopro.ru/products/csp/downloads
-2. Распаковываем. Далее:
 http://pushorigin.ru/cryptopro/cryptcp
 
-Cryptopro server:\n
+
+1. Устанавливаем cryptopr csp через центр загрузок https://www.cryptopro.ru/products/csp/downloads
+2. Распаковываем. Устанавливаем
+3. Делаем алиасы: `export PATH="$(/bin/ls -d /opt/cprocsp/{s,}bin/*|tr '\n' ':')$PATH"`
+4. Копируем закрытый ключ
+5. Теперь необходимо создать контейнер и после связать его с сертификатом.
+ВАЖНО: все действия с сертификатом делать для того юзера, кто будет запускать скрипт. В моем случае это юзер a1 (он же запускает gunicorn, nginx).
+
+93e4b302.000 - это закрытый ключ
+36c6fa72.cer - это сертификат
+
 ```
-tar -xzf linux-amd64.tgz
-cd linux-amd64
-sudo ./install.sh
+cp -R 93e4b302.000 /var/opt/cprocsp/keys/a1 # Копируем ключ в ключи юзера a1
+chmod 600 /var/opt/cprocsp/keys/a1/93e4b302.000 # Ставим права
+csptest -keyset -enum_cont -verifycontext -fqcn  # Узнаем реальное название контейнера (после копирования ключа создается контейнер)
+(в моем случае это: HDIMAGE\36c6fa72-8df5-40b9-8915-f40d66d8ac73)
+certmgr -inst -file 36c6fa72.cer -cont '\\.\HDIMAGE\36c6fa72-8df5-40b9-8915-f40d66d8ac73' # Делаем связку закрытого ключа и сертификата
 
+И после:
+opt/cprocsp/bin/amd64/certmgr --list - должен выдать: PrivateKey Link: Yes
 
-ln -s /opt/cprocsp/bin/amd64/certmgr
-ln -s /opt/cprocsp/bin/amd64/cpverify
-ln -s /opt/cprocsp/bin/amd64/cryptcp
-ln -s /opt/cprocsp/bin/amd64/csptest
-ln -s /opt/cprocsp/bin/amd64/csptestf
-ln -s /opt/cprocsp/bin/amd64/der2xer
-ln -s /opt/cprocsp/bin/amd64/inittst
-ln -s /opt/cprocsp/bin/amd64/wipefile
-ln -s /opt/cprocsp/sbin/amd64/cpconfig
 ```
-3. Необходимо установить тестовые сертификаты. Их должен получить заказчик при регистрации приложения на госуслугах (скачать сертификат на сервер)
-4. Выполняем:
+6. Из последней выше команды берем отпечаток и вставляем его в конфиг esia.ini 
+7. Примерный конфиг для тестовых сертификатов (получили от заказчика):
 ```
-cp -R 93e4b302.000 /var/opt/cprocsp/keys/a1
-chmod 600 /var/opt/cprocsp/keys/a1/93e4b302.000
-/opt/cprocsp/bin/amd64/csptest -keyset -enum_cont -verifycontext -fqcn 
+[esia]
+### Внимание! Все пути указываются относительно данного файла.
+# Базовый адрес сервиса ЕСИА, в данном случае указана тестовая среда
+SERVICE_URL: https://esia-portal1.test.gosuslugi.ru
+
+# Идентификатор информационной системы, указывается в заявке на подключение
+CLIENT_ID: SYSTEM48
 
 
+# Адрес страницы, на которую будет перенаправлен браузер после авторизации в ЕСИА
+REDIRECT_URI: https://api.cov112-48.ru/api/v1/esia/callback/
 
+# Адрес страницы, на которую необходимо перенаправить браузер после логаута в ЕСИА (опционально)
+LOGOUT_REDIRECT_URI: https://api.cov112-48.ru/
+
+# Список scope через пробел. Указывается в заявке, openid при авторизации обязателен
+SCOPE: mobile openid fullname birthdate gender snils medical_doc email
+# Используемый крипто бэкенд: m2crypto, openssl (системный вызов)
+# или csp (системный вызов утилиты cryptcp из состава КриптоПРО CSP)
+CRYPTO_BACKEND: csp
+
+# SHA1 отпечаток сертификата связанного с закрытым ключем, смотреть по выводу certmgr --list
+# (необязателен, используется только для csp)
+CSP_CERT_THUMBPRINT: 6b717c75334811eabf79d85e1c271d115ffa474b
+
+# Пароль (пин-код) контейнера с закрктым ключем
+# (необязателен, используется только для csp)
+CSP_CONTAINER_PWD: 1234567890
+
+```
+8. В esia-oauth2 необходимо добавить `-nochain` (utils.py)
+```
+cmd = (
+        "cryptcp -signf -dir {temp_dir} -der -strict -cert -detached -norev -nochain"
+        " -thumbprint {thumbprint} -pin {password} {f_in}")
+```
+Это отключит проверку цепей и не будет вылазить Prompt (Подтверждение)
+9. Произвести все настройки esia.ini, залить и запустить
+10. Скорее всего, форма госуслуг не появится. Это происходит из-за того, что nginx ругается на слишком большой размер урла. Поэтому в nginx.conf надо добавить:
+```
+	client_max_body_size 20M;
+	proxy_buffer_size 64k;
+  proxy_buffers 4 64k;
+  proxy_busy_buffers_size 64k;
 ```
