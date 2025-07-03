@@ -7,10 +7,16 @@
 import base64
 import datetime
 import json
-import os
+import os, sys
 import tempfile
+import traceback
+from subprocess import Popen, PIPE
 
 import pytz
+
+# sys.path.append(r'/usr/lib')
+
+import pycades
 
 import requests
 
@@ -102,6 +108,114 @@ def smime_sign(certificate_file, private_key_file, data, backend='m2crypto'):
             'Unknown cryptography backend. Use openssl or m2crypto value.')
 
 
+def create_detached_gost_cades_bes_signature(file_path, signature_out_path, cert_thumbprint, key_pin:str, check_chain: bool = True):
+    """
+    Создает отсоединенную электронную подпись формата CAdES-BES для указанного файла
+    с использованием ГОСТ Р алгоритмов и библиотеки Pycades.
+   
+    :param key_pin: Пин-код контейнера закрытого ключа
+    :type key_pin: str
+    :param file_path: Путь к файлу, который нужно подписать.
+    :param signature_out_path: Путь для сохранения файла отсоединенной подписи (обычно .sig или .p7s).
+    :param cert_thumbprint: Отпечаток (thumbprint) сертификата ГОСТ Р, который будет использован для подписи.
+                                   Отпечаток должен быть указан без пробелов и в верхнем регистре.
+    :param check_chain: Проверка цепочки сертификатов
+    :type check_chain: bool
+    
+    :return: True, если подпись успешно создана, иначе False.
+    """
+    store = None  # Инициализируем store здесь, чтобы он был доступен в блоке finally
+    try:
+        # 1. Проверка существования файла для подписи
+        if not os.path.exists(file_path):
+            print(f"Ошибка: Файл для подписи не найден по пути: {file_path}")
+            return False
+        
+        # 2. Инициализация и открытие хранилища сертификатов.
+        # Открываем личное хранилище текущего пользователя
+        store = pycades.Store()
+        store.Open(pycades.CAPICOM_CURRENT_USER_STORE,
+                   pycades.CAPICOM_MY_STORE,
+                   pycades.CAPICOM_STORE_OPEN_MAXIMUM_ALLOWED)
+        
+        # 3. Поиск и выбор сертификата по отпечатку
+        certs = store.Certificates
+        if certs.Count == 0:
+            print("Ошибка: В хранилище не найдено ни одного сертификата.")
+            return False
+        
+        # Ищем сертификат по отпечатку (SHA1 HASH)
+        # Отпечаток должен быть точным, без пробелов, в верхнем регистре.
+        found_certs = certs.Find(pycades.CAPICOM_CERTIFICATE_FIND_SHA1_HASH, cert_thumbprint.upper())
+        
+        if found_certs.Count == 0:
+            print(f"Ошибка: Сертификат с отпечатком '{cert_thumbprint}' не найден в хранилище.")
+            return False
+        
+        signer_cert = found_certs.Item(1)  # Берем первый найденный сертификат
+        
+        # Проверка, что у сертификата есть закрытый ключ
+        if not signer_cert.HasPrivateKey():
+            print(
+                f"Ошибка: Выбранный сертификат (Subject: {signer_cert.SubjectName}, Thumbprint: {signer_cert.Thumbprint}) не имеет связанного закрытого ключа.")
+            return False
+        
+        print(
+            f"Используется сертификат: {signer_cert.SubjectName}, Выдан: {signer_cert.IssuerName}, Действителен до: {signer_cert.ValidToDate}")
+        
+        # 4. Создание объекта подписанта (Signer)
+        signer = pycades.Signer()
+        signer.Certificate = signer_cert
+        signer.CheckCertificate = check_chain  # Включить проверку цепочки сертификатов (опционально, но рекомендуется)
+        # Алгоритмы хеширования и подписи обычно определяются автоматически на основе сертификата ГОСТ Р.
+        # При необходимости можно указать явно, например, для объекта CAdESCOM.CPSigner:
+        # signer.HashAlgorithm = "1.2.643.7.1.1.2.2" # OID для ГОСТ Р 34.11-2012 (256 бит)
+        # signer.Options = pycades.CAPICOM_CERTIFICATE_INCLUDE_WHOLE_CHAIN # Включить всю цепочку в подпись
+        signer.KeyPin = key_pin
+        
+        # 5. Подготовка данных для подписи (SignedData)
+        signed_data = pycades.SignedData()
+        
+        # Чтение содержимого файла в бинарном режиме
+        with open(file_path, 'r') as f:
+            file_content_bytes = f.read()
+        
+        # signed_data.ContentEncoding = pycades.CADESCOM_BASE64_TO_BINARY
+        # message_bytes = api_key.encode("utf-8")
+        # base64_message = base64.b64encode(message_bytes)
+        # signedData.Content = base64_message.decode("utf-8")
+        
+        # Загружаем содержимое файла. Pycades ожидает бинарные данные (bytes).
+        signed_data.Content = file_content_bytes
+        
+        # 6. Создание отсоединенной подписи CAdES-BES
+        # Метод SignCades(Signer, CadesType, Detached, EncodingType)
+        # Signer: объект подписанта
+        # CadesType: тип подписи (pycades.CADES_BES, pycades.CADES_T, etc.)
+        # Detached: True для отсоединенной подписи, False для присоединенной
+        # EncodingType: формат вывода подписи (pycades.ENCODE_BASE64 или pycades.ENCODE_BINARY)
+        signature_base64 = signed_data.SignCades(signer,
+                                                 pycades.CADESCOM_CADES_BES,
+                                                 True,  # True для отсоединенной подписи
+                                                 pycades.CADESCOM_ENCODE_BASE64)  # Подпись в формате Base64
+        
+        # 7. Сохранение подписи в отдельный файл
+        with open(signature_out_path, 'w') as sig_file:
+            sig_file.write(signature_base64)
+        
+        print(f"Отсоединенная подпись CAdES-BES успешно создана и сохранена в файл: {signature_out_path}")
+        return True
+    
+    except Exception as e:
+        print(f"Критическая ошибка при создании подписи: {e}")
+        # error_info = pycades.LastError()
+        # if error_info:
+        #     print(f"Код ошибки КриптоПро: {error_info.Code:#08x} ({error_info.Message})")
+        return False
+    finally:
+        if store:
+            store.Close()
+
 def csp_sign(thumbprint, password, data):
     """
     Подписывает данные с использованием ГОСТ Р 34.10-2012 открепленной подписи.
@@ -113,9 +227,8 @@ def csp_sign(thumbprint, password, data):
     :param str data: подписываемые данные
     """
     temp_dir = tempfile.gettempdir()
-    source_file = tempfile.NamedTemporaryFile(mode='w', delete=False)
-    source_file.write(data)
-    source_file.close()
+    with tempfile.NamedTemporaryFile(mode='w', delete=False) as source_file:
+        source_file.write(data)
     source_path = source_file.name
 
 
@@ -134,23 +247,39 @@ def csp_sign(thumbprint, password, data):
     # cryptcp -signf -dir "/tmp" -der -strict -cert -detached -thumbprint "$thumbprint" -pin "$pin" "/tmp/message"
 
     cmd = (
-        "cryptcp -signf -dir {temp_dir} -der -strict -cert -detached "
-        "-thumbprint {thumbprint} -pin {password} {f_in}")
-
-    os.system(cmd.format(
-        temp_dir=temp_dir,
-        password=password,
-        f_in=source_path,
-        thumbprint=thumbprint
-    ))
-
+        f"/opt/cprocsp/bin/amd64/cryptcp -signf -dir {temp_dir} -der -strict -cert -detached -thumbprint {thumbprint}  -nochain -pin {password} {source_path}")
+       
+    proc = Popen(
+            cmd,
+            shell=True,
+            stdout=PIPE, stderr=PIPE
+    )
+    proc.wait()  # дождаться выполнения
+    hash_res = proc.communicate()
+    
     f_out = f'{source_path}.sgn'
-    signed_message = open(f_out, 'rb').read()
+    f_out2 = f'{source_path}2.sgn'
+    try:
+        with open(f_out, "rb") as f:
+            signed_message = f.read()
+    except Exception as e:
+        print(traceback.format_exc())
+    
+    # todo change to True for prod
+    res_cades = create_detached_gost_cades_bes_signature(source_path, f_out2, thumbprint, password, False)
+    
+    try:
+        with open(f_out2, "rb") as f:
+            signed_message2 = f.read()
+    except Exception as e:
+        print(traceback.format_exc())
+
+    tr = signed_message == signed_message2
+    
     os.unlink(source_path)
     os.unlink(f_out)
 
-
-    return signed_message
+    return signed_message2
 
 
 def sign_params(params, settings, backend='csp'):
@@ -166,8 +295,16 @@ def sign_params(params, settings, backend='csp'):
     :return: подписанные параметры запроса
     :rtype: dict
     """
-    plaintext = params.get('scope', '') + params.get('timestamp', '') + \
-        params.get('client_id', '') + params.get('state', '')
+    plaintext = f"{params.get('client_id', '')}{params.get('scope', '')}org_inf{params.get('timestamp', '')}{params.get('state', '')}{params.get('redirect_uri')}"
+    # client_id
+    #  scope;
+    #  scope_org;
+    #  timestamp;
+    #  state;
+    #  redirect_uri.
+    
+    # plaintext = params.get('scope', '') + params.get('timestamp', '') + \
+    #     params.get('client_id', '') + params.get('state', '')
     if backend == 'csp':
         raw_client_secret = csp_sign(
             settings.csp_cert_thumbprint,
@@ -177,8 +314,8 @@ def sign_params(params, settings, backend='csp'):
             settings.certificate_file, settings.private_key_file,
             plaintext, backend)
     params.update(
-        client_secret=base64.urlsafe_b64encode(
-            raw_client_secret).decode('utf-8'),
+        client_secret=raw_client_secret.decode('utf-8'),
+        # client_secret=base64.urlsafe_b64encode(raw_client_secret).decode('utf-8'),
     )
     return params
 
